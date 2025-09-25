@@ -35,7 +35,6 @@ loss_type: "mse" # MSE by default
 
 # Model parameters
 model_name: "MOMENT"
-seq_len: 512
 patch_len: 8
 patch_stride_len: 8
 transformer_backbone: 'google/flan-t5-large' # 'google/flan-t5-base' 'google/flan-t5-large'
