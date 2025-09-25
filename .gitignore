@@ -2,6 +2,9 @@
 notebooks/development/data/*
 notebooks/development/*.py
 wandb/
+data/Timeseries-PILE
+moment/data/temp/
+data/temp/
 # exclude shell scripts in root directory
 /*.sh
 .env
