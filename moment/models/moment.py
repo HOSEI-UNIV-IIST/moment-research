@@ -18,6 +18,9 @@ from moment.utils.utils import (
 
 from .layers.embed import PatchEmbedding, Patching
 from .layers.revin import RevIN
+from transformers.models.t5.modeling_t5 import T5Attention
+import math
+
 
 SUPPORTED_HUGGINGFACE_MODELS = [
     "t5-small",
@@ -60,6 +63,44 @@ class PretrainHead(nn.Module):
         )  # [batch_size x n_channels x n_patches x patch_len]
         x = x.flatten(start_dim=2, end_dim=3)  # [batch_size x n_patches x seq_len]
         return x
+
+class LoRALinear(nn.Module):
+    def __init__(self, orig_linear, r=4, alpha=1.0, dropout=0.1):
+        super().__init__()
+        self.orig = orig_linear
+        self.r = r
+        self.alpha = alpha
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+        self.lora_A = nn.Linear(orig_linear.in_features, r, bias=False)
+        self.lora_B = nn.Linear(r, orig_linear.out_features, bias=False)
+
+        self.scale = self.alpha / self.r
+
+        for param in self.orig.parameters():
+            param.requires_grad = False
+
+        nn.init.zeros_(self.lora_B.weight)
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+
+    def forward(self, x):
+        return self.orig(x) + self.scale * self.lora_B(self.lora_A(self.dropout(x)))
+    
+
+    def apply_lora(self, r=8, alpha=16.0, dropout=0.1):
+
+        for name, module in self.named_modules():
+            # module이 T5Attention인지 확인
+            if isinstance(module, T5Attention):
+                for proj_name in ["q", "v", "o"]:
+                    orig = getattr(module, proj_name, None)
+                    if isinstance(orig, nn.Linear):
+                        # LoRA 래퍼 생성
+                        lora_mod = LoRALinear(orig, r=r, alpha=alpha, dropout=dropout)
+                        setattr(module, proj_name, lora_mod)
+                        print(f"LoRA 적용: {name}.{proj_name}")
+        return self
+
 
 
 class ClassificationHead(nn.Module):
@@ -241,12 +282,23 @@ class MOMENT(nn.Module):
 
     def _get_huggingface_transformer(self, configs):
         from transformers import T5Config, T5EncoderModel, T5Model
-
+        from momentfm import MOMENTPipeline
         if configs.getattr("randomly_initialize_backbone", False):
-            model_config = T5Config.from_pretrained(configs.transformer_backbone)
-            transformer_backbone = T5Model(model_config)
-            logging.info(f"Initializing randomly initialized\
-                          transformer from {configs.transformer_backbone}.")
+            if configs.getattr("initialize_backbone_with_pretrained_moment", True):
+                transformer_backbone = MOMENTPipeline.from_pretrained(
+                        "AutonLab/MOMENT-1-base", 
+                        model_kwargs={"task_name": "reconstruction"},
+                    )
+                if configs.getattr('training_pretrained_moment_with_lora', True):
+                    transformer_backbone = LoRALinear.apply_lora(transformer_backbone, r=4, alpha=16.0, dropout=0.1)
+
+                logging.info(f"Initializing pre-trained transformers from\
+                            pre-traiend moment from  {configs.transformer_backbone}.")
+            else:
+                model_config = T5Config.from_pretrained(configs.transformer_backbone)
+                transformer_backbone = T5Model(model_config)
+                logging.info(f"Initializing randomly initialized\
+                            transformer from {configs.transformer_backbone}.")
         else:
             transformer_backbone = T5EncoderModel.from_pretrained(
                 configs.transformer_backbone
@@ -255,7 +307,10 @@ class MOMENT(nn.Module):
                           transformer from {configs.transformer_backbone}.")
 
         if configs.transformer_type == "encoder_only":
-            transformer_backbone = transformer_backbone.get_encoder()
+            try:
+                transformer_backbone = transformer_backbone.get_encoder()
+            except:
+                transformer_backbone = transformer_backbone.encoder
         elif configs.transformer_type == "decoder_only":
             transformer_backbone = transformer_backbone.get_decoder()
 
@@ -371,7 +426,6 @@ class MOMENT(nn.Module):
         if mask is None:
             mask = self.mask_generator.generate_mask(x=x_enc, input_mask=input_mask)
             mask = mask.to(x_enc.device)  # mask: [batch_size x seq_len]
-
         # Normalization
         x_enc = self.normalizer(x=x_enc, mask=mask * input_mask, mode="norm")
         # x_enc = self.normalizer(x=x_enc, mask=input_mask, mode='norm')

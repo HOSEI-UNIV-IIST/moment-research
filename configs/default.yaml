@@ -21,7 +21,7 @@ add_positional_embedding: True # Wheter to add positional embedding to the input
 set_input_mask: True # Whether to set the input mask
 randomly_initialize_backbone: True # Whether to randomly initialize the encoder
 transformer_type: "encoder_only" # "encoder_decoder" "encoder_only" "decoder_only"
-transformer_backbone: 'google/flan-t5-large' # "PatchTST" "google/flan-t5-base" "t5-large"
+transformer_backbone: 'google/flan-t5-small' # "PatchTST" "google/flan-t5-base" "t5-large"
 freeze_transformer_backbone: False # Whether to freeze the transformer backbone
 n_soft_prompt_tokens: 20 # Number of soft prompt tokens
 

@@ -168,29 +168,31 @@ class Tasks(nn.Module):
 
     def save_model(
         self,
-        model: nn.Module,
+        models: dict,  # ← key: name, value: nn.Module
         path: str,
         opt_steps: int,
         optimizer: torch.optim.Optimizer,
         scaler: torch.cuda.amp.GradScaler,
     ):
         checkpoint = {
-            "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scaler_state_dict": scaler.state_dict(),
         }
 
-        if opt_steps is None:
-            with open(os.path.join(path, f"{self.args.model_name}.pth"), "wb") as f:
-                torch.save(checkpoint, f)
-        else:
-            with open(
-                os.path.join(
-                    path, f"{self.args.model_name}_checkpoint_{opt_steps}.pth"
-                ),
-                "wb",
-            ) as f:
-                torch.save(checkpoint, f)
+        # 모델들 각각 state_dict 저장
+        for name, model in models.items():
+            checkpoint[f"{name}_state_dict"] = model.state_dict()
+
+        # 파일 저장
+        filename = (
+            f"{self.args.model_name}_checkpoint_{opt_steps}.pth"
+            if opt_steps is not None
+            else f"{self.args.model_name}.pth"
+        )
+
+        save_path = os.path.join(path, filename)
+        with open(save_path, "wb") as f:
+            torch.save(checkpoint, f)
 
     def save_model_and_alert(self, opt_steps):
         self.save_model(

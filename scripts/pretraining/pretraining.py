@@ -1,15 +1,16 @@
-import sys
-import os
 import argparse
 
 import torch
+
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from moment.common import PATHS
 from moment.tasks.pretrain import Pretraining
 from moment.utils.config import Config
 from moment.utils.utils import control_randomness, make_dir_if_not_exists, parse_config
 
-sys.path.append(os.path.abspath('/Users/messou/PycharmProjects/ML/moment-research'))
 
 def pretrain(
     config_path: str = "configs/pretraining/pretrain.yaml",
@@ -20,7 +21,7 @@ def pretrain(
         config_file_path=config_path, default_config_file_path=default_config_path
     ).parse()
 
-    control_randomness(config["random_seed"])
+    # control_randomness(config["random_seed"])
 
     config["device"] = gpu_id if torch.cuda.is_available() else "cpu"
     config["checkpoint_path"] = PATHS.CHECKPOINTS_DIR
@@ -44,6 +45,8 @@ if __name__ == "__main__":
         default="configs/pretraining/pretrain.yaml",
         help="Path to config file",
     )
-    parser.add_argument("--gpu_id", type=int, default=0, help="GPU ID to use")
+    parser.add_argument("--gpu_id", type=int, default=1, help="GPU ID to use")
     args = parser.parse_args()
     pretrain(config_path=args.config, gpu_id=args.gpu_id)
+
+    # python scripts/pretraining/pretraining.py

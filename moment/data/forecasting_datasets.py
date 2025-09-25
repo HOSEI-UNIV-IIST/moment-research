@@ -18,12 +18,13 @@ warnings.filterwarnings("ignore")
 
 
 DATA_COLLECTIONS = [
+    "ETTh1"
     "autoformer",
     "monash",
     "epidemic/preprocessed",
     "fred/preprocessed",
 ]
-DATASETS_EPIDEMIC = ["EU-Flu", "ILI-US"]
+DATASETS_EPIDEMIC = ["EU-Flu", "ILI-US", "ETTh1"]
 DATASETS_EXTENSIONS = [".tsf", ".csv", ".npy"]
 
 
@@ -58,15 +59,15 @@ class LongForecastingDataset(TaskDataset):
         self,
         seq_len: int = 512,
         forecast_horizon: int = 96,
-        full_file_path_and_name: str = "../TimeseriesDatasets/forecasting/autoformer/ETTh1.csv",
+        full_file_path_and_name: str = "/data/ETTh1/ETTh1.csv",
         data_split: str = "train",
         target_col: Optional[str] = "OT",
         scale: bool = True,
         data_stride_len: int = 1,
         task_name: str = "long-horizon-forecasting",
-        train_ratio: float = 0.6,
-        val_ratio: float = 0.1,
-        test_ratio: float = 0.3,
+        train_ratio: float = 1.0,
+        val_ratio: float = 0,
+        test_ratio: float = 0,
         output_type: str = "univariate",
         random_seed: int = 42,
         **kwargs,
@@ -185,10 +186,16 @@ class LongForecastingDataset(TaskDataset):
             n_val = 4 * 30 * 24 * 4
             n_test = 4 * 30 * 24 * 4
 
+        # elif "ETTh" in self.dataset_name:
+        #     n_train = 12 * 30 * 24
+        #     n_val = 1 * 30 * 24
+        #     n_test = 1 * 30 * 24
+        
         elif "ETTh" in self.dataset_name:
-            n_train = 12 * 30 * 24
-            n_val = 4 * 30 * 24
-            n_test = 4 * 30 * 24
+            n_train = int(self.train_ratio * self.length_timeseries_original)
+            n_test = int(self.test_ratio * self.length_timeseries_original)
+            n_val = self.length_timeseries_original - n_train - n_test
+
 
         elif self.dataset_name in remaining_autoformer_datasets:
             n_train = int(self.train_ratio * self.length_timeseries_original)

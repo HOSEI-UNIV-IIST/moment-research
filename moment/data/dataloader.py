@@ -72,8 +72,10 @@ def _collate_fn_basic(examples):
     names = [example.name for example in examples]
     timeseries = torch.stack(timeseries)
     input_masks = torch.stack(input_masks)
+    # ✅ 여기서 한 채널만 선택하고 길이를 자름 (e.g., 178)
+   #timeseries = timeseries[:, :1, :1024] #configs.TSlength_aligned
+   #input_masks = input_masks[:, :1024] #configs.TSlength_aligned
     names = np.asarray(names)
-
     return TimeseriesData(timeseries=timeseries, input_mask=input_masks, name=names)
 
 
@@ -112,7 +114,7 @@ def get_timeseries_dataloader(args, **kwargs):
         def init_dataset(name, cls):
             args.full_file_path_and_name = name
             return cls(**vars(args))
-
+            
         dataset_classes = []
         dataset_classes = Parallel(n_jobs=args.num_workers)(
             delayed(init_dataset)(name, cls)
@@ -158,6 +160,7 @@ def get_timeseries_dataloader(args, **kwargs):
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
         collate_fn=collate_fn_map[args.task_name],
+        drop_last = True
     )
 
     return dataloader
