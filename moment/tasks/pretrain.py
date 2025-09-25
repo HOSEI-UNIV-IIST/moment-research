@@ -1,7 +1,7 @@
 import os
 import subprocess
 import warnings
-
+import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,11 +10,13 @@ from tqdm import tqdm
 from wandb import AlertLevel
 
 from moment.common import PATHS
-from moment.models.momentwithTFC import MOMENT_re, MOMENTDecoder, TFC
+from moment.models.moment import MOMENT
 from moment.utils.utils import MetricsStore, dtype_map, make_dir_if_not_exists
-from moment.data.datatransform import dataconversion
-from .base import Tasks
-from moment.models.loss import NTXentLoss_poly
+from moment.utils.hashing import sha256_of_tensor, sha256_of_string, sha256_of_array
+from moment.data.base import TimeseriesData
+
+from .base import Tasks, AugmentedTTM
+
 warnings.filterwarnings("ignore")
 
 
@@ -22,11 +24,8 @@ class Pretraining(Tasks):
     def __init__(self, args, **kwargs):
         super().__init__(args=args, **kwargs)
         self.args = args
-        self.encoder_re = MOMENT_re(args)
-        self.decoder = MOMENTDecoder(args)
-        self.tfc = TFC(args)
-        self.nt_xent_poly = NTXentLoss_poly(args)
-
+        self.get_dataset_signatures()
+    
     def validation(self, data_loader, return_preds: bool = False):
         trues, preds, masks, losses = [], [], [], []
 
@@ -70,50 +69,155 @@ class Pretraining(Tasks):
             return average_loss, losses, (trues, preds, masks)
         else:
             return average_loss
+        
+    def validation_on_subset(self, subset: list, return_preds: bool = False):
+        trues, preds, masks, losses = [], [], [], []
+
+        self.model.eval()
+        with torch.no_grad():
+            for batch_x in subset:
+                timeseries = batch_x.timeseries.float().to(self.device)
+                input_mask = batch_x.input_mask.long().to(self.device)
+
+                with torch.autocast(
+                    device_type="cuda",
+                    dtype=dtype_map(self.args.torch_dtype),
+                    enabled=self.args.use_amp,
+                ):
+                    outputs = self.model(
+                        x_enc=timeseries, input_mask=input_mask, mask=None
+                    )
+
+                recon_loss = self.criterion(outputs.reconstruction, timeseries)
+                observed_mask = input_mask * (1 - outputs.pretrain_mask)
+                n_channels = outputs.reconstruction.shape[1]
+                observed_mask = observed_mask.unsqueeze(1).repeat((1, n_channels, 1))
+                masked_loss = observed_mask * recon_loss
+                loss = masked_loss.nansum() / (observed_mask.nansum() + 1e-7)
+
+                losses.append(loss.item())
+
+                if return_preds:
+                    trues.append(timeseries.detach().cpu().numpy())
+                    preds.append(outputs.reconstruction.detach().cpu().numpy())
+                    masks.append(outputs.pretrain_mask.detach().cpu().numpy())
+
+        losses = np.array(losses)
+        average_loss = np.average(losses)
+        self.model.train()
+
+        if return_preds:
+            trues = np.concatenate(trues, axis=0)
+            preds = np.concatenate(preds, axis=0)
+            masks = np.concatenate(masks, axis=0)
+            return average_loss, losses, (trues, preds, masks)
+        else:
+            return average_loss
+
+    def get_dataset_signatures(self):
+        # We'll hash the data loaders to validate complete reproducibility
+        # Across model tests, ensuring that all batches are processed in the same order
+        # and that everything is exactly the same
+        # Essentially, we are guaranteeing that circumstances are completely identical
+        # across model tests
+        data_loaders_sample_sets = {k: set() for k in ["train", "val", "test"]}
+        hash_data_loaders_thorough = {k: "a" for k in ["train", "val", "test", "full"]}
+        for (loader, key) in zip(
+            [self.train_dataloader, self.val_dataloader, self.test_dataloader], 
+            ["train", "val", "test"]
+        ):
+            for batch in tqdm(loader, desc=f"Hashing {key} data"):
+                batch : TimeseriesData = batch
+                
+                try:
+                    all_hashes = [
+                        sha256_of_array(e) if not e is None else sha256_of_string("None") for e in [
+                            batch.timeseries,
+                            batch.forecast,
+                            batch.labels,
+                            batch.input_mask,
+                            batch.metadata,
+                            batch.name
+                        ]
+                    ]
+                    
+                    sample_hash = sha256_of_array(batch.timeseries)
+                    hash_data_loaders_thorough[key] = sha256_of_string("".join(all_hashes))
+                    data_loaders_sample_sets[key].add(sample_hash)
+                except Exception as e:
+                    print(f"Error hashing time_series: {e}")
+                    raise e
+                
+                # hash_data_loaders_thorough[key] += sample_hash
+                # hash_data_loaders_thorough[key] += sha256_of_tensor(batch["mask"])
+                # hash_data_loaders_thorough[key] += sha256_of_tensor(batch["idx"])
+                
+                # hash_data_loaders_thorough[key] = sha256_of_string(hash_data_loaders_thorough[key])
+            
+            hash_data_loaders_thorough["full"] += hash_data_loaders_thorough[key]
+        hash_data_loaders_thorough["full"] = sha256_of_string(hash_data_loaders_thorough["full"])
+        
+        
+        # Check that intersections are empty
+        for key in data_loaders_sample_sets:
+            for other_key in data_loaders_sample_sets:
+                if key == other_key:
+                    continue
+                
+                intersection = data_loaders_sample_sets[key].intersection(data_loaders_sample_sets[other_key])
+                assert len(intersection) == 0, \
+                    f"Intersections are not empty for {key} and {other_key} ({len(intersection)} samples in common)"
+        
+        with open(os.path.join(self.args.checkpoint_path, "dataset_signatures.json"), "w") as f:
+            json.dump(hash_data_loaders_thorough, f)
+
+        print("="*20, "Dataset signatures", "="*20)
+        print(json.dumps(hash_data_loaders_thorough, indent=4))
+        print("="*50)
+        
 
     def train(self):
         self.run_name = self.logger.name
+        print("Run name:", self.run_name)
+        print("Logger:", vars(self.logger))
+        
+        first_print = True
+        
         path = os.path.join(self.args.checkpoint_path, self.run_name)
         make_dir_if_not_exists(path, verbose=True)
 
-        all_params = list(self.encoder_re.parameters()) + \
-             list(self.decoder.parameters()) + \
-             list(self.tfc.parameters())
-
-        # 중복 제거
-        seen = set()
-        unique_params = []
-        for p in all_params:
-            if id(p) not in seen:
-                unique_params.append(p)
-                seen.add(id(p))
-
-        self.optimizer = torch.optim.AdamW(
-            unique_params,
-            lr=self.args.init_lr,
-            weight_decay=self.args.weight_decay,
-        )
-
-
+        self.optimizer = self._select_optimizer()
         self.criterion = self._select_criterion()
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.args.use_amp)
         self._init_lr_scheduler()
 
-        self.encoder_re.to(self.device)
-        self.decoder.to(self.device)
-        self.tfc.to(self.device)
-        # self.evaluate_and_log()
+        self.model.to(self.device)
 
         opt_steps = 0
         cur_epoch = 0
-        while opt_steps < self.args.max_opt_steps or cur_epoch < self.args.max_epoch:
-            self.encoder_re.train()
-            self.decoder.train()
-            self.tfc.train()
-
-            for batch_x in tqdm(
-                self.train_dataloader, total=len(self.train_dataloader)
-            ):
+        
+        val_batches = [val_batch for val_batch in self.val_dataloader]
+        
+        if isinstance(self.model, AugmentedTTM):
+            self.model.config.task_name = "pretrain"
+        
+        
+        while (opt_steps < self.args.max_opt_steps) or (cur_epoch < self.args.max_epoch):
+            self.model.train()
+            
+            last_val_idx, current_pbar_dict = 0, {}
+            
+            
+            print(f"Training on {self.args.max_opt_steps} steps or {self.args.max_epoch} epochs")
+            
+            pbar = tqdm(
+                self.train_dataloader, 
+                total=len(self.train_dataloader),
+                desc=f"Epoch {cur_epoch+1}/{self.args.max_epoch}"
+            )
+            for batch_idx, batch_x in enumerate(pbar):
+                current_epoch_progress = batch_idx / len(self.train_dataloader)
+                
                 self.optimizer.zero_grad(set_to_none=True)
                 timeseries = batch_x.timeseries.float().to(self.device)
                 input_mask = batch_x.input_mask.long().to(self.device)
@@ -121,76 +225,74 @@ class Pretraining(Tasks):
                 if not self.args.set_input_mask:
                     input_mask = torch.ones_like(input_mask)
 
-                t2, f1, f2, mask_t2, dummy_mask_f1, dummy_mask_f2 = dataconversion(timeseries, self.args, input_mask=input_mask, mask=None)
-
                 with torch.autocast(
                     device_type="cuda",
                     dtype=dtype_map(self.args.torch_dtype),
                     enabled=self.args.use_amp,
                 ):
-                    out_t1, out_t2, out_f1, out_f2, input_mask, pretrain_mask, mean , stdev = self.encoder_re(
-                        x_enc_re=timeseries, x_enc_t2=t2, x_enc_f1=f1, x_enc_f2=f2, input_mask=input_mask, mask=None, mask_t2=mask_t2, mask_f1=dummy_mask_f1, mask_f2=dummy_mask_f2)
+                    if first_print:
+                        print("Passing inputs to model")
+                        print(f"Timeseries: {type(timeseries)} {timeseries.shape}")
+                        print(f"Input mask: {type(input_mask)} {input_mask.shape}")
+                        
+                    outputs = self.model(
+                        x_enc=timeseries, input_mask=input_mask, mask=None
+                    )
+
+                    if first_print:
+                        print(f"Outputs: {type(outputs)}")
+                        
                 
-                    
-                    
-                dec_out =  self.decoder(
-                    enc_out=out_t1,
-                    input_mask=input_mask,
-                    pretrain_mask=pretrain_mask,
-                    mean=mean,
-                    stdev=stdev
-                )
-
-
-                h_t, z_t, h_f, z_f = self.tfc(out_t1, out_f1)
-                h_t_aug, z_t_aug, h_f_aug, z_f_aug = self.tfc(out_t2, out_f2)
-
-
-                recon_loss = self.criterion(dec_out.reconstruction, timeseries)
-                observed_mask = input_mask * (1 - dec_out.pretrain_mask)
-                n_channels = dec_out.reconstruction.shape[1]
+                if first_print:
+                    print("Attempting to calc loss")
+                    print(f"Outputs: {type(outputs.reconstruction)} {outputs.reconstruction.shape}")
+                    print(f"Timeseries: {type(timeseries)} {timeseries.shape}")
+                
+                recon_loss = self.criterion(outputs.reconstruction, timeseries)
+                
+                if first_print:
+                    print(f"Recon loss: {type(recon_loss)} {recon_loss.shape}")
+                
+                observed_mask = input_mask * (1 - outputs.pretrain_mask)
+                n_channels = outputs.reconstruction.shape[1]
                 observed_mask = observed_mask.unsqueeze(1).repeat((1, n_channels, 1))
                 masked_loss = observed_mask * recon_loss
-                loss_moment = masked_loss.nansum() / (observed_mask.nansum() + 1e-7)
+                loss = masked_loss.nansum() / (observed_mask.nansum() + 1e-7)
 
-
-
-                loss_t = self.nt_xent_poly(h_t, h_t_aug)
-                loss_f = self.nt_xent_poly(h_f, h_f_aug)
-                l_TF = self.nt_xent_poly(z_t, z_f) # this is the initial version of TF loss
-
-                l_1, l_2, l_3 = self.nt_xent_poly(z_t, z_f_aug), self.nt_xent_poly(z_t_aug, z_f), self.nt_xent_poly(z_t_aug, z_f_aug)
-                loss_c = (1 + l_TF - l_1) + (1 + l_TF - l_2) + (1 + l_TF - l_3)
-
-                lam = 0.2
-                loss_tfc = lam*(loss_t + loss_f) + l_TF
-
-                lam2 = 0.1
-                total_loss = loss_moment + lam2*loss_tfc
-
+                train_loss = loss.item()
+                current_pbar_dict["train"] = train_loss
+                pbar.set_postfix(current_pbar_dict)
+                
                 self.logger.log(
                     {
-                        "loss_tfc": loss_tfc.item(),
-                        "loss_moment": loss_moment.item(),
-                        "step_train_loss": total_loss.item(),
+                        "step_train_loss": train_loss,
                         "learning_rate": self.optimizer.param_groups[0]["lr"],
                     }
                 )
 
                 if self.args.debug and opt_steps >= 1:
-                    self.debug_model_outputs(loss_moment, dec_out, batch_x)
+                    self.debug_model_outputs(loss, outputs, batch_x)
 
-                self.scaler.scale(total_loss).backward()
+                self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                # Gradient Clipping
-                nn.utils.clip_grad_norm_(
-                    list(self.encoder_re.parameters())
-                    + list(self.decoder.parameters())
-                    + list(self.tfc.parameters()),
-                    self.args.max_norm
-                )
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_norm)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                
+                
+                
+                # Pause and run a batch of val loss
+                new_val_idx = int(current_epoch_progress * len(self.val_dataloader))
+                if new_val_idx > last_val_idx:
+                    subset = val_batches[last_val_idx:new_val_idx]
+                    val_loss = self.validation_on_subset(subset)
+                    
+                    self.logger.log({"validation_loss": val_loss})
+                    self.model.train()
+                    last_val_idx = new_val_idx
+                    current_pbar_dict["val"] = val_loss
+                    pbar.set_postfix(current_pbar_dict)
+                
                 opt_steps = opt_steps + 1
 
                 # if opt_steps % self.args.log_interval == 0:
@@ -203,25 +305,38 @@ class Pretraining(Tasks):
                         level=AlertLevel.INFO,
                     )
                     self.save_model(
-                        models={
-                            "encoder_re": self.encoder_re,
-                            "decoder": self.decoder,
-                            "tfc": self.tfc,
-                        },
-                        path=path,
-                        opt_steps=opt_steps,
-                        optimizer=self.optimizer,
-                        scaler=self.scaler,
+                        self.model, path, opt_steps, self.optimizer, self.scaler
                     )
+                    # self.evaluate_model_external(path, opt_steps, self.device)
 
-                    self.evaluate_model_external(path, opt_steps, self.device)
                 self.lr_scheduler.step(cur_epoch=cur_epoch, cur_step=opt_steps)
 
+                if first_print:
+                    first_print = False
+                
             cur_epoch = cur_epoch + 1
 
-        return {
-            "encoder_re": self.encoder_re,
-            "decoder": self.decoder,
-            "tfc": self.tfc,
-        }
+        return self.model
 
+    def evaluate_model(self):
+        return MetricsStore(val_loss=self.validation(self.val_dataloader))
+
+    def evaluate_and_log(self):
+        eval_metrics = self.evaluate_model()
+        self.logger.log({"validation_loss": eval_metrics.val_loss})
+        return eval_metrics
+
+    def evaluate_model_external(self, path: str, opt_steps: int, device) -> None:
+        print("starting evaluation")
+        eval_device = int(str(device).split(":")[-1]) + 1
+        command = [
+            "python",
+            "scripts/evaluation/evaluation.py",
+            f"--checkpoint_path={path}",
+            f"--opt_steps={opt_steps}",
+            f"--run_name={self.run_name}",
+            f"--gpu_id={eval_device}",
+        ]
+        outfile = open(f"{path}/eval_output.txt", "w")
+        errfile = open(f"{path}/eval_error.txt", "w")
+        subprocess.Popen(command, stdout=outfile, stderr=errfile)

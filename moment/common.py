@@ -23,9 +23,7 @@ def set_transformers_cache_path(transformers_cache_path: str):
 
 @dataclass
 class PATHS:
-    DATA_DIR: str = "/home/jinseopalang/TSFM/moment-research/TimeseriesDatasets"
-    # DATA_DIR: str = os.getenv("MOMENT_DATA_DIR")
-    CHECKPOINTS_DIR: str = "results/moment_checkpoints/"
-    # CHECKPOINTS_DIR: str = os.getenv("MOMENT_CHECKPOINTS_DIR")
+    DATA_DIR: str = os.getenv("MOMENT_DATA_DIR")
+    CHECKPOINTS_DIR: str = os.getenv("MOMENT_CHECKPOINTS_DIR")
     RESULTS_DIR: str = os.getenv("MOMENT_RESULTS_DIR")
     WANDB_DIR: str = os.getenv("WANDB_DIR")

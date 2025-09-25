@@ -120,11 +120,6 @@ To pre-train the model on the previously downloaded Timeseries-PILE dataset, run
 bash reproduce/pretraining/pretrain.sh
 ```
 
-If any error arises, make sure to export the correct path or import:
-```bash
-export PYTHONPATH=$PYTHONPATH:path_to_location_of/moment-research
-```
-
 To reproduce any other experiment, look into the `reproduce/` directory and run the corresponding script. For example, to reproduce the cross-modal experiments, run the following command:
 ```bash
 bash reproduce/cross-modal/FlanT5.sh

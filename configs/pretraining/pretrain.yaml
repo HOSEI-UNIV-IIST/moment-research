@@ -20,14 +20,12 @@ add_positional_embedding: False # Wheter to add positional embedding to the inpu
 set_input_mask: True # Whether to set the input mask
 randomly_initialize_backbone: True # Whether to randomly initialize the encoder
 transformer_type: "encoder_only" # "encoder_decoder" "encoder_only" "decoder_only"
-transformer_backbone: 'google/flan-t5-base' # PatchTST" "google/flan-t5-base" "t5-large"
+transformer_backbone: 'google/flan-t5-large' # "PatchTST" "google/flan-t5-base" "t5-large"
 freeze_transformer_backbone: False # Whether to freeze the transformer backbone
-training_pretrained_moment_with_lora: True # Whether to train pre-trained moment with lora
-initialize_backbone_with_pretrained_moment : True # Whether to initialize with pre-trained momet
 
 # Logging
-log_interval: 2000 #100000
-checkpoint_interval: 1000 #5000
+log_interval: 100000
+checkpoint_interval: 5000
 debug: False
 
 # Training parameters
@@ -42,34 +40,29 @@ init_lr: 0.0001 # 1e-4
 min_lr: 0.00001 # 1e-5
 lr_decay_rate: 0.9
 warmup_lr: 0.00001 # 1e-5
-warmup_steps: 100 # 1000
+warmup_steps: 1000
 use_amp: True
-max_opt_steps: 5000 # 5000000
-max_epoch: 25 # 50
-
-# TF-C configs
-temperature: 0.2
-use_cosine_similarity: True
-
+max_opt_steps: 5000000
+max_epoch: 50
 
 # Dataset parameters
 target_col : 'OT'
 scale : True
 data_stride_len : 1 
-train_ratio : 1.0
-val_ratio : 0
-test_ratio : 0
+train_ratio : 0.6
+val_ratio : 0.1
+test_ratio : 0.3
 upsampling_pad_direction : "backward"
 upsampling_type : "pad"
 downsampling_type : "interpolate"
 pad_mode : "constant"
 pad_constant_values : 0
-dataset_names : "all"
+dataset_names : 'all'
 datasets_fraction : 1.00
-train_batch_size : 512 # 2048 # 1024 2048 3072 4096
-val_batch_size: 512 # 3072 # 1024 2048 3072 4096 
+train_batch_size : 2048 # 1024 2048 3072 4096
+val_batch_size: 3072 # 1024 2048 3072 4096 
 shuffle : True
 num_workers : 5
 pin_memory : True
 drop_last : False
-TSlength_aligned: 512
+seed : 42
